@@ -6,7 +6,6 @@ declare_id!("AhHHJTu5vodDYE2yLNet2bE6jad9F3xSfbLQdUmykKqB");
 pub mod aim_program {
     use super::*;
 
-    // Create a new farmer identity on-chain
     pub fn create_farmer_id(
         ctx: Context<CreateFarmerID>,
         full_name: String,
@@ -22,11 +21,11 @@ pub mod aim_program {
         farmer.farm_size = farm_size;
         farmer.has_active_loan = false;
         farmer.created_at = Clock::get()?.unix_timestamp;
+        farmer.bump = ctx.bumps.farmer;
         msg!("Farmer ID created for: {}", farmer.full_name);
         Ok(())
     }
 
-    // Request a microloan — only if farmer has no active loan
     pub fn request_loan(
         ctx: Context<RequestLoan>,
         amount: u64,
@@ -34,10 +33,7 @@ pub mod aim_program {
         repayment_weeks: u8,
     ) -> Result<()> {
         let farmer = &mut ctx.accounts.farmer;
-
-        // Check farmer has no active loan
         require!(!farmer.has_active_loan, AimError::ActiveLoanExists);
-
         let loan = &mut ctx.accounts.loan;
         loan.farmer = farmer.key();
         loan.owner = ctx.accounts.owner.key();
@@ -46,64 +42,61 @@ pub mod aim_program {
         loan.repayment_weeks = repayment_weeks;
         loan.is_repaid = false;
         loan.created_at = Clock::get()?.unix_timestamp;
-
-        // Mark farmer as having active loan
+        loan.bump = ctx.bumps.loan;
         farmer.has_active_loan = true;
-
-        msg!("Loan approved for {} lamports", amount);
+        msg!("Loan requested for {} lamports", amount);
         Ok(())
     }
 
-    // Repay a loan
     pub fn repay_loan(ctx: Context<RepayLoan>) -> Result<()> {
         let loan = &mut ctx.accounts.loan;
         let farmer = &mut ctx.accounts.farmer;
-
         require!(!loan.is_repaid, AimError::LoanAlreadyRepaid);
-
         loan.is_repaid = true;
         farmer.has_active_loan = false;
-
         msg!("Loan repaid successfully");
         Ok(())
     }
 }
 
-// Farmer ID account structure
 #[account]
 pub struct FarmerAccount {
-    pub owner: Pubkey,
-    pub full_name: String,
-    pub crop_type: String,
-    pub district: String,
-    pub farm_size: f64,
-    pub has_active_loan: bool,
-    pub created_at: i64,
+    pub owner: Pubkey,         // 32
+    pub full_name: String,     // 4 + 64
+    pub crop_type: String,     // 4 + 32
+    pub district: String,      // 4 + 32
+    pub farm_size: f64,        // 8
+    pub has_active_loan: bool, // 1
+    pub created_at: i64,       // 8
+    pub bump: u8,              // 1
 }
 
-// Loan account structure
 #[account]
 pub struct LoanAccount {
-    pub farmer: Pubkey,
-    pub owner: Pubkey,
-    pub amount: u64,
-    pub purpose: String,
-    pub repayment_weeks: u8,
-    pub is_repaid: bool,
-    pub created_at: i64,
+    pub farmer: Pubkey,      // 32
+    pub owner: Pubkey,       // 32
+    pub amount: u64,         // 8
+    pub purpose: String,     // 4 + 64
+    pub repayment_weeks: u8, // 1
+    pub is_repaid: bool,     // 1
+    pub created_at: i64,     // 8
+    pub bump: u8,            // 1
 }
 
-// Account contexts
 #[derive(Accounts)]
 pub struct CreateFarmerID<'info> {
     #[account(
         init,
         payer = owner,
-        space = 8 + 32 + 64 + 32 + 32 + 8 + 1 + 8
+        space = 8 + 32 + 68 + 36 + 36 + 8 + 1 + 8 + 1,
+        seeds = [b"farmer", owner.key().as_ref()],
+        bump
     )]
     pub farmer: Account<'info, FarmerAccount>,
+
     #[account(mut)]
     pub owner: Signer<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -112,26 +105,47 @@ pub struct RequestLoan<'info> {
     #[account(
         init,
         payer = owner,
-        space = 8 + 32 + 32 + 8 + 64 + 1 + 1 + 8
+        space = 8 + 32 + 32 + 8 + 68 + 1 + 1 + 8 + 1,
+        seeds = [b"loan", owner.key().as_ref()],
+        bump
     )]
     pub loan: Account<'info, LoanAccount>,
-    #[account(mut, has_one = owner)]
+
+    #[account(
+        mut,
+        seeds = [b"farmer", owner.key().as_ref()],
+        bump = farmer.bump,
+        has_one = owner
+    )]
     pub farmer: Account<'info, FarmerAccount>,
+
     #[account(mut)]
     pub owner: Signer<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct RepayLoan<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"loan", owner.key().as_ref()],
+        bump = loan.bump,
+        constraint = loan.owner == owner.key() @ AimError::LoanAlreadyRepaid
+    )]
     pub loan: Account<'info, LoanAccount>,
-    #[account(mut, has_one = owner)]
+
+    #[account(
+        mut,
+        seeds = [b"farmer", owner.key().as_ref()],
+        bump = farmer.bump,
+        has_one = owner
+    )]
     pub farmer: Account<'info, FarmerAccount>,
+
     pub owner: Signer<'info>,
 }
 
-// Custom errors
 #[error_code]
 pub enum AimError {
     #[msg("Farmer already has an active loan")]
