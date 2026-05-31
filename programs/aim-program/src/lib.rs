@@ -49,12 +49,15 @@ pub mod aim_program {
     }
 
     pub fn repay_loan(ctx: Context<RepayLoan>) -> Result<()> {
-        let loan = &mut ctx.accounts.loan;
-        let farmer = &mut ctx.accounts.farmer;
-        require!(!loan.is_repaid, AimError::LoanAlreadyRepaid);
-        loan.is_repaid = true;
-        farmer.has_active_loan = false;
+        require!(!ctx.accounts.loan.is_repaid, AimError::LoanAlreadyRepaid);
+        ctx.accounts.farmer.has_active_loan = false;
         msg!("Loan repaid successfully");
+        Ok(())
+    }
+
+    pub fn close_loan(ctx: Context<CloseLoan>) -> Result<()> {
+        require!(ctx.accounts.loan.is_repaid, AimError::LoanNotRepaid);
+        msg!("Loan account closed");
         Ok(())
     }
 }
@@ -131,7 +134,8 @@ pub struct RepayLoan<'info> {
         mut,
         seeds = [b"loan", owner.key().as_ref()],
         bump = loan.bump,
-        constraint = loan.owner == owner.key() @ AimError::LoanAlreadyRepaid
+        constraint = loan.owner == owner.key() @ AimError::LoanAlreadyRepaid,
+        close = owner
     )]
     pub loan: Account<'info, LoanAccount>,
 
@@ -143,6 +147,22 @@ pub struct RepayLoan<'info> {
     )]
     pub farmer: Account<'info, FarmerAccount>,
 
+    #[account(mut)]
+    pub owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseLoan<'info> {
+    #[account(
+        mut,
+        seeds = [b"loan", owner.key().as_ref()],
+        bump = loan.bump,
+        constraint = loan.owner == owner.key() @ AimError::LoanAlreadyRepaid,
+        close = owner
+    )]
+    pub loan: Account<'info, LoanAccount>,
+
+    #[account(mut)]
     pub owner: Signer<'info>,
 }
 
@@ -152,4 +172,6 @@ pub enum AimError {
     ActiveLoanExists,
     #[msg("Loan has already been repaid")]
     LoanAlreadyRepaid,
+    #[msg("Loan has not been repaid yet")]
+    LoanNotRepaid,
 }

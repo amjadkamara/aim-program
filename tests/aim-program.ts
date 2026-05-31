@@ -104,11 +104,12 @@ describe("aim-program", () => {
       })
       .rpc();
 
-    const loan = await program.account.loanAccount.fetch(loanPDA);
-    assert.equal(loan.isRepaid, true);
+    // Loan account is closed on repayment — should no longer exist
+    const loan = await program.account.loanAccount.fetchNullable(loanPDA);
+    assert.isNull(loan, "Loan account should be closed after repayment");
 
     const farmer = await program.account.farmerAccount.fetch(farmerPDA);
     assert.equal(farmer.hasActiveLoan, false);
-    console.log("✅ Loan repaid successfully");
+    console.log("✅ Loan repaid and account closed successfully");
   });
 });
