@@ -113,6 +113,16 @@ pub mod aim_program {
         require!(!farmer.has_active_loan, AimError::ActiveLoanExists);
         require!(ctx.accounts.lender.is_active, AimError::LenderNotActive);
 
+        // Capital bookkeeping: a lender's declared capital_budget_lamports is
+        // the ceiling on what they can have outstanding at once. This is a
+        // counter only — no SOL/USDC actually moves here — but it must be
+        // accurate and enforced, or the same declared budget could back an
+        // unlimited number of loans.
+        require!(
+            amount <= ctx.accounts.lender.capital_budget_lamports,
+            AimError::InsufficientCapitalBudget
+        );
+
         let loan = &mut ctx.accounts.loan;
         loan.farmer = farmer.key();
         loan.owner = ctx.accounts.owner.key();
@@ -127,6 +137,15 @@ pub mod aim_program {
         farmer.has_active_loan = true;
         farmer.loan_counter = farmer.loan_counter.saturating_add(1);
 
+        // Decrement only after the require! above has already guaranteed
+        // amount <= capital_budget_lamports, so this can't underflow.
+        ctx.accounts.lender.capital_budget_lamports = ctx
+            .accounts
+            .lender
+            .capital_budget_lamports
+            .checked_sub(amount)
+            .ok_or(AimError::InsufficientCapitalBudget)?;
+
         msg!(
             "Loan requested for {} lamports from lender {}",
             amount,
@@ -139,19 +158,30 @@ pub mod aim_program {
         require!(!ctx.accounts.loan.is_repaid, AimError::LoanAlreadyRepaid);
 
         // Mark the loan repaid instead of silently leaving is_repaid false.
-        // The loan account is intentionally NOT closed here anymore (see
-        // RepayLoan account context below) — it stays on-chain, flagged
-        // repaid, so admin dashboards and loan history can see it. The
-        // separate close_loan instruction (farmer-initiated, requires
-        // is_repaid == true) is what actually reclaims the rent, matching
-        // the "Clear repaid loan account to re-borrow" flow in the frontend.
+        // The loan account is intentionally NOT closed here (see RepayLoan
+        // account context below) — it stays on-chain, flagged repaid, so
+        // admin/lender dashboards and loan history can see it. The separate
+        // close_loan instruction (farmer-initiated, requires is_repaid ==
+        // true) is what actually reclaims the rent.
         ctx.accounts.loan.is_repaid = true;
         ctx.accounts.farmer.has_active_loan = false;
         ctx.accounts.farmer.credit_score = ctx.accounts.farmer.credit_score.saturating_add(10);
 
+        // Capital bookkeeping: restore the borrowed amount to the lender's
+        // available budget. saturating_add rather than checked_add — mirrors
+        // the pattern already used for credit_score/loan_counter elsewhere
+        // in this file, and there's no realistic path to overflow here since
+        // the amount being restored was decremented from this same budget.
+        ctx.accounts.lender.capital_budget_lamports = ctx
+            .accounts
+            .lender
+            .capital_budget_lamports
+            .saturating_add(ctx.accounts.loan.amount);
+
         msg!(
-            "Loan repaid successfully. New credit score: {}",
-            ctx.accounts.farmer.credit_score
+            "Loan repaid successfully. New credit score: {}. Capital restored to lender {}.",
+            ctx.accounts.farmer.credit_score,
+            ctx.accounts.lender.key()
         );
         Ok(())
     }
@@ -287,6 +317,8 @@ pub struct RequestLoan<'info> {
     )]
     pub farmer: Account<'info, FarmerAccount>,
 
+    // Now mutable — request_loan writes to capital_budget_lamports.
+    #[account(mut)]
     pub lender: Account<'info, LenderAccount>,
 
     #[account(mut)]
@@ -297,17 +329,15 @@ pub struct RequestLoan<'info> {
 
 #[derive(Accounts)]
 pub struct RepayLoan<'info> {
-    // NOTE: `close = owner` intentionally removed. Repaying a loan should
-    // flag it repaid and leave it on-chain — closing it here (as before)
-    // destroyed the record before admin dashboards or loan history could
-    // ever see it as "Repaid," and made the separate close_loan instruction
-    // unreachable dead code. The farmer now clears the account explicitly
-    // via close_loan (see CloseLoan below) once they're ready to re-borrow.
+    // NOTE: `close = owner` intentionally removed (see V2.3.1). Repaying a
+    // loan flags it repaid and leaves it on-chain; the farmer clears it
+    // explicitly via close_loan once ready to re-borrow.
     #[account(
         mut,
         seeds = [b"loan", owner.key().as_ref()],
         bump = loan.bump,
         constraint = loan.owner == owner.key() @ AimError::LoanAlreadyRepaid,
+        has_one = lender @ AimError::LenderMismatch,
     )]
     pub loan: Account<'info, LoanAccount>,
 
@@ -318,6 +348,13 @@ pub struct RepayLoan<'info> {
         has_one = owner
     )]
     pub farmer: Account<'info, FarmerAccount>,
+
+    // New: needed so repay_loan can restore capital_budget_lamports.
+    // has_one = lender on the loan above guarantees this is the exact
+    // LenderAccount the loan was drawn from — a caller can't pass a
+    // different lender to inflate someone else's budget.
+    #[account(mut)]
+    pub lender: Account<'info, LenderAccount>,
 
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -354,4 +391,8 @@ pub enum AimError {
     LenderNotActive,
     #[msg("This wallet already holds a different role on the protocol")]
     WalletAlreadyHasRole,
+    #[msg("This loan amount exceeds the lender's remaining capital budget")]
+    InsufficientCapitalBudget,
+    #[msg("The lender account provided does not match the loan's issuing lender")]
+    LenderMismatch,
 }
